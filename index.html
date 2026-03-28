@@ -452,16 +452,11 @@ const KEY_MEM = 'rsd_mem_v4';
 const KEY_SES = 'rsd_ses_v4';
 
 // ── BASE DE DATOS EN LA NUBE (JSONBin.io) ──────────────────────────────────
-// Todos los dispositivos comparten los mismos datos automáticamente.
-// Bin IDs y API Key de JSONBin.io (gratuito)
-const JSONBIN_KEY = '$2a$10$ROSASUD_PLACEHOLDER_KEY'; // Se reemplaza en primera configuración
-const BIN_REC = 'RECORDS_BIN_ID';   // Se crea automáticamente al primer uso
-const BIN_MEM = 'MEMBERS_BIN_ID';
+// Los bins se crean UNA SOLA VEZ desde jsonbin.io y se pegan los IDs aquí.
+// Después todos los dispositivos leen y escriben los mismos datos.
 
-// Cache local para velocidad
 let _cacheRec = null;
 let _cacheMem = null;
-let _dbReady = false;
 
 const DEFAULT_MEMBERS = [
   {code:'EMP-001',name:'GAVILANEZ CAYAMBE LEIDY VANESSA',cedula:'0202497251',pass:'leidy123',role:'lider',cargo:'COORDINADORA DE LABORATORIO',area:'CONTROL DE CALIDAD'},
@@ -474,102 +469,93 @@ const DEFAULT_MEMBERS = [
   {code:'EMP-008',name:'LAINEZA PABLO CESAR',cedula:'',pass:'pablo123',role:'empleado',cargo:'ANALISTA DE CALIDAD',area:'CONTROL DE CALIDAD'},
 ];
 
-// ── CONFIG NUBE: guardada en localStorage solo para IDs y API key ──
-function getCloudCfg() {
-  try { return JSON.parse(localStorage.getItem('rsd_cloud_cfg')) || {}; } catch { return {}; }
-}
+function getCloudCfg() { try { return JSON.parse(localStorage.getItem('rsd_cloud_cfg')) || {}; } catch { return {}; } }
 function setCloudCfg(cfg) { localStorage.setItem('rsd_cloud_cfg', JSON.stringify(cfg)); }
 
-// ── JSONBIN HELPERS ──
+// ── JSONBIN API ──
 async function jbGet(binId, apiKey) {
-  const r = await fetch(`https://api.jsonbin.io/v3/b/${binId}/latest`, {
+  const r = await fetch('https://api.jsonbin.io/v3/b/' + binId + '/latest', {
     headers: { 'X-Master-Key': apiKey, 'X-Bin-Meta': 'false' }
   });
-  if (!r.ok) throw new Error('GET failed: ' + r.status);
+  if (!r.ok) throw new Error('Error leyendo datos: ' + r.status);
   return await r.json();
 }
 async function jbSet(binId, apiKey, data) {
-  const r = await fetch(`https://api.jsonbin.io/v3/b/${binId}`, {
+  const r = await fetch('https://api.jsonbin.io/v3/b/' + binId, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'X-Master-Key': apiKey },
     body: JSON.stringify(data)
   });
-  if (!r.ok) throw new Error('PUT failed: ' + r.status);
+  if (!r.ok) throw new Error('Error guardando datos: ' + r.status);
   return await r.json();
 }
+// Crear bin (solo una vez, desde el panel admin)
 async function jbCreate(apiKey, name, data) {
+  const headers = { 'Content-Type': 'application/json', 'X-Master-Key': apiKey, 'X-Bin-Name': name };
   const r = await fetch('https://api.jsonbin.io/v3/b', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Master-Key': apiKey, 'X-Bin-Name': name },
-    body: JSON.stringify(data)
+    method: 'POST', headers, body: JSON.stringify(data)
   });
-  if (!r.ok) throw new Error('CREATE failed: ' + r.status);
+  if (!r.ok) {
+    const txt = await r.text().catch(()=>'');
+    throw new Error(r.status + ': ' + txt.slice(0,200));
+  }
   const j = await r.json();
   return j.metadata.id;
 }
 
-// ── INICIALIZAR BASE DE DATOS EN LA NUBE ──
+// ── INIT ──
 async function initCloudDB() {
   const cfg = getCloudCfg();
-  // Si ya está configurada, cargar datos
   if (cfg.apiKey && cfg.binRec && cfg.binMem) {
     try {
       _cacheMem = await jbGet(cfg.binMem, cfg.apiKey);
       _cacheRec = await jbGet(cfg.binRec, cfg.apiKey);
-      // Sincronizar también al localStorage como fallback
       localStorage.setItem(KEY_MEM, JSON.stringify(_cacheMem));
       localStorage.setItem(KEY_REC, JSON.stringify(_cacheRec));
-      _dbReady = true;
       return true;
     } catch(e) {
-      console.warn('Cloud no disponible, usando caché local:', e);
-      // Fallback a localStorage
-      _cacheMem = JSON.parse(localStorage.getItem(KEY_MEM)) || DEFAULT_MEMBERS;
-      _cacheRec = JSON.parse(localStorage.getItem(KEY_REC)) || [];
-      return false;
+      console.warn('Nube no disponible, usando local:', e.message);
     }
   }
-  // Sin configurar: usar localStorage como fallback
   _cacheMem = JSON.parse(localStorage.getItem(KEY_MEM)) || DEFAULT_MEMBERS;
   _cacheRec = JSON.parse(localStorage.getItem(KEY_REC)) || [];
   return false;
 }
 
-// ── CONFIGURAR NUBE (llamado desde panel admin) ──
+// ── CONFIGURAR NUBE: crea los 2 bins automáticamente ──
 async function configurarNube(apiKey) {
   const key = apiKey.trim();
-  if (!key.startsWith('a0$')) {
-    showToast('⚠️ Usa la X-MAESTRO-LLAVE (empieza con a0$)', '#b45309');
-    return false;
+  if (key.length < 20) {
+    showToast('⚠️ La clave parece muy corta, cópiala completa', '#b45309'); return false;
   }
+  const msgEl = document.getElementById('cloud-msg');
+  const btn = document.querySelector('#cloud-config-section .btn-add');
+  if (btn) { btn.disabled = true; btn.textContent = '⟳ Creando...'; }
   try {
-    showToast('☁️ Verificando clave...', '#2563b0');
-    // Validar la clave creando un bin de prueba
-    const members = JSON.parse(localStorage.getItem(KEY_MEM)) || DEFAULT_MEMBERS;
-    const records  = JSON.parse(localStorage.getItem(KEY_REC)) || [];
-    showToast('☁️ Creando base de datos (paso 1/2)...', '#2563b0');
-    const binMem = await jbCreate(key, 'ROSASUD-Miembros', members);
-    showToast('☁️ Creando base de datos (paso 2/2)...', '#2563b0');
+    showToast('☁️ Creando bin de registros...', '#2563b0');
+    const members = _cacheMem || DEFAULT_MEMBERS;
+    const records  = _cacheRec || [];
     const binRec = await jbCreate(key, 'ROSASUD-Registros', records);
+    showToast('☁️ Creando bin de miembros...', '#2563b0');
+    const binMem = await jbCreate(key, 'ROSASUD-Miembros', members);
     setCloudCfg({ apiKey: key, binRec, binMem });
-    _cacheMem = members;
-    _cacheRec = records;
-    _dbReady = true;
-    showToast('✅ ¡Base de datos compartida activada!', '#059669');
+    _cacheMem = members; _cacheRec = records;
+    showToast('✅ ¡Sincronización activada!', '#059669');
+    if (btn) { btn.disabled = false; btn.textContent = '☁️ Activar sincronización'; }
+    renderCloudStatus();
     return true;
   } catch(e) {
     let msg = e.message;
-    if (msg.includes('400')) msg = 'Clave inválida. Usa la X-MAESTRO-LLAVE de JSONBin';
-    if (msg.includes('401')) msg = 'Clave incorrecta. Cópiala de nuevo desde JSONBin';
-    if (msg.includes('403')) msg = 'Sin permisos. Verifica que sea la X-MAESTRO-LLAVE';
-    showToast('❌ ' + msg, '#dc2626');
-    const msgEl = document.getElementById('cloud-msg');
-    if (msgEl) { msgEl.style.display='block'; msgEl.style.color='#dc2626'; msgEl.textContent = '❌ ' + msg + ' — Asegúrate de copiar la X-MAESTRO-LLAVE completa (no la X-ACCESS-KEY)'; }
+    if (msg.includes('401') || msg.includes('403')) msg = '❌ Clave incorrecta — copia la X-MAESTRO-LLAVE completa';
+    else if (msg.includes('400')) msg = '❌ Error 400 — verifica que la clave sea la X-MAESTRO-LLAVE (no X-Access-Key)';
+    else msg = '❌ ' + msg;
+    showToast(msg, '#dc2626');
+    if (msgEl) { msgEl.style.display='block'; msgEl.style.color='#dc2626'; msgEl.textContent = msg; }
+    if (btn) { btn.disabled = false; btn.textContent = '☁️ Activar sincronización'; }
     return false;
   }
 }
 
-// ── GETTERS/SETTERS unificados ──
 const getMembers = () => _cacheMem || (JSON.parse(localStorage.getItem(KEY_MEM)) || DEFAULT_MEMBERS);
 const getRecords = () => _cacheRec || (JSON.parse(localStorage.getItem(KEY_REC)) || []);
 
@@ -578,7 +564,7 @@ async function saveMembers(m) {
   localStorage.setItem(KEY_MEM, JSON.stringify(m));
   const cfg = getCloudCfg();
   if (cfg.apiKey && cfg.binMem) {
-    try { await jbSet(cfg.binMem, cfg.apiKey, m); } catch(e) { console.warn('Cloud sync error (members):', e); }
+    try { await jbSet(cfg.binMem, cfg.apiKey, m); } catch(e) { console.warn('Sync error:', e.message); }
   }
 }
 async function saveRecords(r) {
@@ -586,26 +572,24 @@ async function saveRecords(r) {
   localStorage.setItem(KEY_REC, JSON.stringify(r));
   const cfg = getCloudCfg();
   if (cfg.apiKey && cfg.binRec) {
-    try { await jbSet(cfg.binRec, cfg.apiKey, r); } catch(e) { console.warn('Cloud sync error (records):', e); }
+    try { await jbSet(cfg.binRec, cfg.apiKey, r); } catch(e) { console.warn('Sync error:', e.message); }
   }
 }
 
-// ── POLLING automático para el líder (refresca desde la nube cada 20s) ──
 async function refreshFromCloud() {
   const cfg = getCloudCfg();
   if (!cfg.apiKey || !cfg.binRec) return;
   try {
     const fresh = await jbGet(cfg.binRec, cfg.apiKey);
-    const localStr = JSON.stringify(_cacheRec);
-    const freshStr = JSON.stringify(fresh);
-    if (localStr !== freshStr) {
+    if (JSON.stringify(_cacheRec) !== JSON.stringify(fresh)) {
       _cacheRec = fresh;
       localStorage.setItem(KEY_REC, JSON.stringify(fresh));
       if (CU && CU.role === 'lider') { renderLiderReport(); buildLiderGrid(); }
       if (CU) renderMyReport();
     }
-  } catch(e) { /* silencioso */ }
+  } catch(e) {}
 }
+
 const today = () => { const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
 const ini = n => n.split(' ').slice(0,2).map(w=>w[0]).join('');
 const dayN = d => ['DOM','LUN','MAR','MIÉ','JUE','VIE','SÁB'][new Date(d+'T12:00:00').getDay()];
