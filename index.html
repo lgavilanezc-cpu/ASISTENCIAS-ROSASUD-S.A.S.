@@ -500,7 +500,7 @@ async function jbSet(binId, apiKey, data) {
 async function jbCreate(apiKey, name, data) {
   const r = await fetch('https://api.jsonbin.io/v3/b', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Master-Key': apiKey, 'X-Bin-Name': name, 'X-Bin-Private': 'true' },
+    headers: { 'Content-Type': 'application/json', 'X-Master-Key': apiKey, 'X-Bin-Name': name },
     body: JSON.stringify(data)
   });
   if (!r.ok) throw new Error('CREATE failed: ' + r.status);
@@ -537,23 +537,34 @@ async function initCloudDB() {
 
 // ── CONFIGURAR NUBE (llamado desde panel admin) ──
 async function configurarNube(apiKey) {
+  const key = apiKey.trim();
+  if (!key.startsWith('a0$')) {
+    showToast('⚠️ Usa la X-MAESTRO-LLAVE (empieza con a0$)', '#b45309');
+    return false;
+  }
   try {
-    showToast('☁️ Configurando base de datos compartida...', '#2563b0');
-    // Obtener datos actuales locales
+    showToast('☁️ Verificando clave...', '#2563b0');
+    // Validar la clave creando un bin de prueba
     const members = JSON.parse(localStorage.getItem(KEY_MEM)) || DEFAULT_MEMBERS;
     const records  = JSON.parse(localStorage.getItem(KEY_REC)) || [];
-    // Crear los dos bins
-    const binMem = await jbCreate(apiKey, 'ROSASUD-Miembros', members);
-    const binRec = await jbCreate(apiKey, 'ROSASUD-Registros', records);
-    // Guardar config
-    setCloudCfg({ apiKey, binRec, binMem });
+    showToast('☁️ Creando base de datos (paso 1/2)...', '#2563b0');
+    const binMem = await jbCreate(key, 'ROSASUD-Miembros', members);
+    showToast('☁️ Creando base de datos (paso 2/2)...', '#2563b0');
+    const binRec = await jbCreate(key, 'ROSASUD-Registros', records);
+    setCloudCfg({ apiKey: key, binRec, binMem });
     _cacheMem = members;
     _cacheRec = records;
     _dbReady = true;
     showToast('✅ ¡Base de datos compartida activada!', '#059669');
     return true;
   } catch(e) {
-    showToast('❌ Error: ' + e.message, '#dc2626');
+    let msg = e.message;
+    if (msg.includes('400')) msg = 'Clave inválida. Usa la X-MAESTRO-LLAVE de JSONBin';
+    if (msg.includes('401')) msg = 'Clave incorrecta. Cópiala de nuevo desde JSONBin';
+    if (msg.includes('403')) msg = 'Sin permisos. Verifica que sea la X-MAESTRO-LLAVE';
+    showToast('❌ ' + msg, '#dc2626');
+    const msgEl = document.getElementById('cloud-msg');
+    if (msgEl) { msgEl.style.display='block'; msgEl.style.color='#dc2626'; msgEl.textContent = '❌ ' + msg + ' — Asegúrate de copiar la X-MAESTRO-LLAVE completa (no la X-ACCESS-KEY)'; }
     return false;
   }
 }
